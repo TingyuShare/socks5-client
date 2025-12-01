@@ -12,16 +12,16 @@ import (
 	"golang.org/x/net/proxy"
 )
 
-// proxyDecision 用于缓存决策结果
+// proxyDecision is used to cache the routing decision.
 type proxyDecision int
 
 const (
 	decisionUnknown proxyDecision = iota
 	decisionUseSocksProxy
-	decisionBypassProxy // 修改为更通用的“Bypass”
+	decisionBypassProxy
 )
 
-// SmartDialer 结构体实现了 proxy.Dialer 接口
+// SmartDialer implements the proxy.Dialer interface.
 type SmartDialer struct {
 	socksDialer     proxy.Dialer
 	systemDialer    proxy.Dialer
@@ -29,22 +29,21 @@ type SmartDialer struct {
 	dnsResolver     *net.Resolver
 	cache           map[string]proxyDecision
 	cacheMutex      sync.RWMutex
-	bypassCountries map[string]bool // 新增：用于快速查找需要直连的国家
+	bypassCountries map[string]bool // For quick lookup of countries to bypass.
 }
 
-// NewSmartDialer 创建并初始化一个 SmartDialer
-// 新增 bypassCountriesStr 参数
+// NewSmartDialer creates and initializes a SmartDialer.
 func NewSmartDialer(socksDialer proxy.Dialer, geoipDbPath string, bypassCountriesStr string) (*SmartDialer, error) {
 	if geoipDbPath == "" {
-		return nil, fmt.Errorf("GeoIP数据库路径不能为空")
+		return nil, fmt.Errorf("GeoIP database path cannot be empty")
 	}
 
 	reader, err := geoip2.Open(geoipDbPath)
 	if err != nil {
-		return nil, fmt.Errorf("无法打开 GeoIP 数据库: %w", err)
+		return nil, fmt.Errorf("failed to open GeoIP database: %w", err)
 	}
 
-	// 解析需要直连的国家列表
+	// Parse the list of countries to bypass.
 	bypassMap := make(map[string]bool)
 	if bypassCountriesStr != "" {
 		countries := strings.Split(bypassCountriesStr, ",")
@@ -52,8 +51,7 @@ func NewSmartDialer(socksDialer proxy.Dialer, geoipDbPath string, bypassCountrie
 			bypassMap[strings.ToUpper(strings.TrimSpace(country))] = true
 		}
 	}
-	log.Printf("配置的直连国家: %v", bypassMap)
-
+	log.Printf("Configured bypass countries: %v", bypassMap)
 
 	return &SmartDialer{
 		socksDialer:  socksDialer,
@@ -67,53 +65,52 @@ func NewSmartDialer(socksDialer proxy.Dialer, geoipDbPath string, bypassCountrie
 			},
 		},
 		cache:           make(map[string]proxyDecision),
-		bypassCountries: bypassMap, // 初始化 bypassCountries
+		bypassCountries: bypassMap,
 	}, nil
 }
 
-// Dial 是 SmartDialer 的核心方法，它决定使用哪个拨号器
+// Dial is the core method of SmartDialer that decides which dialer to use.
 func (s *SmartDialer) Dial(network, addr string) (net.Conn, error) {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
 		return nil, err
 	}
 
-	// 1. 检查缓存
+	// 1. Check cache
 	s.cacheMutex.RLock()
 	decision, found := s.cache[host]
 	s.cacheMutex.RUnlock()
 
 	if found {
-		log.Printf("[缓存] 域名 %s 使用 %s", host, decisionToString(decision))
+		log.Printf("[CACHE] Host %s will use %s", host, decisionToString(decision))
 		return s.dialWithDecision(decision, network, addr)
 	}
 
-	// 2. 如果缓存未命中，则进行DNS和GeoIP查询
-	log.Printf("[查询] 域名 %s, 使用 8.8.8.8 DNS...", host)
+	// 2. If cache miss, perform DNS and GeoIP lookup
+	log.Printf("[QUERY] Host %s, using 8.8.8.8 DNS...", host)
 	ips, err := s.dnsResolver.LookupHost(context.Background(), host)
 	if err != nil || len(ips) == 0 {
-		log.Printf("[警告] DNS 解析失败 for %s: %v. 默认直连.", host, err)
+		log.Printf("[WARN] DNS lookup failed for %s: %v. Defaulting to direct connection.", host, err)
 		s.setCache(host, decisionBypassProxy)
 		return s.systemDialer.Dial(network, addr)
 	}
 
 	ip := net.ParseIP(ips[0])
-	log.Printf("[解析] 域名 %s -> IP %s", host, ip)
+	log.Printf("[RESOLVED] Host %s -> IP %s", host, ip)
 
 	record, err := s.geoipReader.Country(ip)
 	if err != nil {
-		log.Printf("[警告] GeoIP 查询失败 for %s: %v. 默认直连.", ip, err)
+		log.Printf("[WARN] GeoIP lookup failed for %s: %v. Defaulting to direct connection.", ip, err)
 		s.setCache(host, decisionBypassProxy)
 		return s.systemDialer.Dial(network, addr)
 	}
 
-	// 3. 根据GeoIP结果和直连列表做出决策
-	// 检查解析出的国家代码是否在直连列表中
+	// 3. Make decision based on GeoIP result and bypass list
 	if _, isBypass := s.bypassCountries[record.Country.IsoCode]; isBypass {
-		log.Printf("[决策] IP %s (%s) 在直连国家列表中, 域名 %s 将直接连接", ip, record.Country.IsoCode, host)
+		log.Printf("[ROUTE] IP %s (%s) is in bypass list, host %s will connect directly", ip, record.Country.IsoCode, host)
 		decision = decisionBypassProxy
 	} else {
-		log.Printf("[决策] IP %s (%s) 不在直连国家列表中, 域名 %s 将使用 SOCKS5 代理", ip, record.Country.IsoCode, host)
+		log.Printf("[ROUTE] IP %s (%s) is not in bypass list, host %s will use SOCKS5 proxy", ip, record.Country.IsoCode, host)
 		decision = decisionUseSocksProxy
 	}
 
@@ -121,7 +118,7 @@ func (s *SmartDialer) Dial(network, addr string) (net.Conn, error) {
 	return s.dialWithDecision(decision, network, addr)
 }
 
-// Close 关闭 GeoIP reader
+// Close closes the GeoIP reader.
 func (s *SmartDialer) Close() {
 	s.geoipReader.Close()
 }
@@ -136,13 +133,13 @@ func (s *SmartDialer) dialWithDecision(decision proxyDecision, network, addr str
 	if decision == decisionUseSocksProxy {
 		return s.socksDialer.Dial(network, addr)
 	}
-	// 默认直连
+	// Default to direct connection
 	return s.systemDialer.Dial(network, addr)
 }
 
 func decisionToString(d proxyDecision) string {
 	if d == decisionUseSocksProxy {
-		return "SOCKS5 代理"
+		return "SOCKS5 Proxy"
 	}
-	return "直接连接"
+	return "Direct Connection"
 }
