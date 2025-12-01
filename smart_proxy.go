@@ -15,6 +15,17 @@ import (
 type contextKey string
 const decisionKey contextKey = "routing-decision"
 
+// proxyDecision is used to cache the routing decision.
+type proxyDecision int
+
+// --- MISSING DEFINITIONS RESTORED ---
+const (
+	decisionUnknown proxyDecision = iota
+	decisionUseSocksProxy
+	decisionBypassProxy
+)
+// --- END OF RESTORED DEFINITIONS ---
+
 // --- 1. SmartResolver: Decides the route and passes it via context ---
 
 type SmartResolver struct {
