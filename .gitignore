@@ -1,0 +1,16 @@
+# Go binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+
+# Coverage output
+*.out
+
+# Local executable name from go.mod
+/socks5-client
+/socks5-client.exe
