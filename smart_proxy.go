@@ -69,8 +69,8 @@ func NewSmartDialer(socksDialer proxy.Dialer, geoipDbPath string, bypassCountrie
 	}, nil
 }
 
-// Dial is the core method of SmartDialer that decides which dialer to use.
-func (s *SmartDialer) Dial(network, addr string) (net.Conn, error) {
+// Dial is the core method of SmartDialer. Its signature is updated to include context.Context.
+func (s *SmartDialer) Dial(ctx context.Context, network, addr string) (net.Conn, error) {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
 		return nil, err
@@ -83,16 +83,16 @@ func (s *SmartDialer) Dial(network, addr string) (net.Conn, error) {
 
 	if found {
 		log.Printf("[CACHE] Host %s will use %s", host, decisionToString(decision))
-		return s.dialWithDecision(decision, network, addr)
+		return s.dialWithDecision(ctx, decision, network, addr)
 	}
 
-	// 2. If cache miss, perform DNS and GeoIP lookup
+	// 2. If cache miss, perform DNS and GeoIP lookup, passing the context.
 	log.Printf("[QUERY] Host %s, using 8.8.8.8 DNS...", host)
-	ips, err := s.dnsResolver.LookupHost(context.Background(), host)
+	ips, err := s.dnsResolver.LookupHost(ctx, host)
 	if err != nil || len(ips) == 0 {
 		log.Printf("[WARN] DNS lookup failed for %s: %v. Defaulting to direct connection.", host, err)
 		s.setCache(host, decisionBypassProxy)
-		return s.systemDialer.Dial(network, addr)
+		return s.dialWithDecision(ctx, decisionBypassProxy, network, addr)
 	}
 
 	ip := net.ParseIP(ips[0])
@@ -102,7 +102,7 @@ func (s *SmartDialer) Dial(network, addr string) (net.Conn, error) {
 	if err != nil {
 		log.Printf("[WARN] GeoIP lookup failed for %s: %v. Defaulting to direct connection.", ip, err)
 		s.setCache(host, decisionBypassProxy)
-		return s.systemDialer.Dial(network, addr)
+		return s.dialWithDecision(ctx, decisionBypassProxy, network, addr)
 	}
 
 	// 3. Make decision based on GeoIP result and bypass list
@@ -115,7 +115,7 @@ func (s *SmartDialer) Dial(network, addr string) (net.Conn, error) {
 	}
 
 	s.setCache(host, decision)
-	return s.dialWithDecision(decision, network, addr)
+	return s.dialWithDecision(ctx, decision, network, addr)
 }
 
 // Close closes the GeoIP reader.
@@ -129,11 +129,25 @@ func (s *SmartDialer) setCache(host string, decision proxyDecision) {
 	s.cache[host] = decision
 }
 
-func (s *SmartDialer) dialWithDecision(decision proxyDecision, network, addr string) (net.Conn, error) {
-	if decision == decisionUseSocksProxy {
-		return s.socksDialer.Dial(network, addr)
+// dialWithDecision now accepts and uses the context.
+func (s *SmartDialer) dialWithDecision(ctx context.Context, decision proxyDecision, network, addr string) (net.Conn, error) {
+	// The proxy.Dialer interface may not have DialContext, so we type assert to proxy.ContextDialer.
+	type ContextDialer interface {
+		DialContext(ctx context.Context, network, addr string) (net.Conn, error)
 	}
+
+	if decision == decisionUseSocksProxy {
+		if d, ok := s.socksDialer.(ContextDialer); ok {
+			return d.DialContext(ctx, network, addr)
+		}
+	}
+	
 	// Default to direct connection
+	if d, ok := s.systemDialer.(ContextDialer); ok {
+		return d.DialContext(ctx, network, addr)
+	}
+
+	// Fallback for older dialers, though proxy.Direct and proxy.SOCKS5 support context.
 	return s.systemDialer.Dial(network, addr)
 }
 
